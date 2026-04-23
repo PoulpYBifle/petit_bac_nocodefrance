@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMutation, useQuery } from 'convex/react'
 import './index.css'
+import { api } from '../convex/_generated/api'
 import {
   activePlayers,
   categoryLabel,
-  createRoom,
   createRound,
   ensureSubmission,
   generateId,
@@ -16,6 +17,7 @@ import {
 } from './lib/game'
 import type {
   GameRound,
+  Player,
   Room,
   RoomConfig,
   RoundCount,
@@ -62,6 +64,58 @@ function defaultConfig(): RoomConfig {
   }
 }
 
+interface SharedLobbyPlayer {
+  sessionId: string
+  nickname: string
+  scoreTotal: number
+  ready: boolean
+  joinedAt: number
+  lastSeenAt: number
+}
+
+interface SharedLobbyRoom {
+  _id: string
+  code: string
+  hostPlayerId: string
+  status: Room['status']
+  config: RoomConfig
+  createdAt: number
+  updatedAt: number
+  currentRoundIndex: number
+  usedLetters: string[]
+  usedCategoryIds: string[]
+  players: SharedLobbyPlayer[]
+}
+
+function toLobbyRoom(sharedRoom: SharedLobbyRoom | null | undefined) {
+  if (!sharedRoom) {
+    return null
+  }
+
+  return {
+    id: String(sharedRoom._id),
+    code: sharedRoom.code,
+    hostPlayerId: sharedRoom.hostPlayerId,
+    status: sharedRoom.status,
+    config: sharedRoom.config,
+    createdAt: sharedRoom.createdAt,
+    updatedAt: sharedRoom.updatedAt,
+    currentRoundIndex: sharedRoom.currentRoundIndex,
+    usedLetters: sharedRoom.usedLetters,
+    usedCategoryIds: sharedRoom.usedCategoryIds,
+    rounds: [],
+    players: sharedRoom.players.map((player) => ({
+      id: player.sessionId,
+      sessionId: player.sessionId,
+      nickname: player.nickname,
+      scoreTotal: player.scoreTotal,
+      ready: player.ready,
+      joinedAt: player.joinedAt,
+      lastSeenAt: player.lastSeenAt,
+    })),
+  } satisfies Room
+}
+
 function App() {
   const sessionId = useMemo(() => getSessionId(), [])
   const [nickname, setNickname] = useState(
@@ -77,6 +131,22 @@ function App() {
   )
   const [copied, setCopied] = useState(false)
   const [clockMs, setClockMs] = useState(() => now())
+  const [joinError, setJoinError] = useState('')
+  const autoJoinCodeRef = useRef('')
+
+  const sharedRoom = useQuery(api.lobby.getRoomByCode, roomCode ? { code: roomCode } : 'skip')
+  const createSharedRoom = useMutation(api.lobby.createRoom)
+  const joinSharedRoom = useMutation(api.lobby.joinRoom)
+  const setSharedReady = useMutation(api.lobby.setReady)
+  const renameSharedPlayer = useMutation(api.lobby.renamePlayer)
+  const sharedHeartbeat = useMutation(api.lobby.heartbeat)
+  const leaveSharedRoom = useMutation(api.lobby.leaveRoom)
+
+  const lobbyRoom = useMemo(
+    () => toLobbyRoom((sharedRoom as SharedLobbyRoom | null | undefined) ?? null),
+    [sharedRoom],
+  )
+  const roomView = lobbyRoom ?? room
 
   useEffect(() => {
     localStorage.setItem(PSEUDO_STORAGE_KEY, nickname)
@@ -115,27 +185,45 @@ function App() {
   }, [roomCode])
 
   useEffect(() => {
+    if (!roomCode || autoJoinCodeRef.current === roomCode) {
+      return
+    }
+
+    let canceled = false
+    autoJoinCodeRef.current = roomCode
+    joinSharedRoom({
+      code: roomCode,
+      sessionId,
+      nickname: nickname.trim() || 'Player',
+    })
+      .then(() => {
+        if (!canceled) {
+          setJoinError('')
+        }
+      })
+      .catch((error: unknown) => {
+        if (!canceled) {
+          setJoinError(error instanceof Error ? error.message : 'Impossible de rejoindre la room')
+          setRoom(null)
+        }
+      })
+
+    return () => {
+      canceled = true
+    }
+  }, [joinSharedRoom, nickname, roomCode, sessionId])
+
+  useEffect(() => {
     if (!roomCode) {
       return
     }
 
     const heartbeat = window.setInterval(() => {
-      const latest = loadRoom(roomCode)
-      if (!latest) {
-        return
-      }
-      const player = latest.players.find((entry) => entry.sessionId === sessionId)
-      if (!player) {
-        return
-      }
-      player.lastSeenAt = now()
-      reassignHost(latest)
-      saveRoom({ ...latest, updatedAt: now() })
-      setRoom(latest)
+      void sharedHeartbeat({ code: roomCode, sessionId })
     }, 5000)
 
     return () => window.clearInterval(heartbeat)
-  }, [roomCode, sessionId])
+  }, [roomCode, sessionId, sharedHeartbeat])
 
   useEffect(() => {
     if (!room) {
@@ -181,12 +269,13 @@ function App() {
     return () => window.clearInterval(interval)
   }, [])
 
-  const me = room?.players.find((player) => player.sessionId === sessionId) ?? null
-  const isHost = me?.id === room?.hostPlayerId
-  const currentRound = room ? getRound(room) : null
+  const me =
+    roomView?.players.find((player: Player) => player.sessionId === sessionId) ?? null
+  const isHost = me?.id === roomView?.hostPlayerId
+  const currentRound = roomView ? getRound(roomView) : null
   const currentSubmission =
-    room && me && currentRound ? currentRound.submissions[me.id] ?? null : null
-  const playersOnline = room ? activePlayers(room) : []
+    roomView && me && currentRound ? currentRound.submissions[me.id] ?? null : null
+  const playersOnline = roomView ? activePlayers(roomView) : []
 
   function updateRoom(mutator: (draft: Room) => void) {
     if (!room) {
@@ -200,38 +289,15 @@ function App() {
     setRoom(draft)
   }
 
-  function ensureMembership(nextRoom: Room) {
-    const existingPlayer = nextRoom.players.find((player) => player.sessionId === sessionId)
-    if (existingPlayer) {
-      existingPlayer.nickname = nickname.trim() || existingPlayer.nickname
-      existingPlayer.lastSeenAt = now()
-      saveRoom(nextRoom)
-      setRoom(nextRoom)
-      return
-    }
-
-    if (nextRoom.players.length >= nextRoom.config.maxPlayers) {
-      return
-    }
-
-    nextRoom.players.push({
-      id: generateId('player'),
+  async function handleCreateRoom() {
+    const created = await createSharedRoom({
+      config,
       sessionId,
       nickname: nickname.trim() || 'Player',
-      scoreTotal: 0,
-      ready: false,
-      joinedAt: now(),
-      lastSeenAt: now(),
     })
-    saveRoom(nextRoom)
-    setRoom(nextRoom)
-  }
-
-  function handleCreateRoom() {
-    const created = createRoom(config, sessionId, nickname.trim() || 'Player')
+    setJoinError('')
+    autoJoinCodeRef.current = ''
     setRoomCode(created.code)
-    saveRoom(created)
-    setRoom(created)
   }
 
   function handleJoinRoom() {
@@ -239,15 +305,23 @@ function App() {
     if (!code) {
       return
     }
-    const existing = loadRoom(code)
-    if (!existing) {
-      return
-    }
-    ensureMembership(existing)
+    setJoinError('')
+    autoJoinCodeRef.current = ''
     setRoomCode(code)
   }
 
-  function handleLeaveRoom() {
+  async function handleLeaveRoom() {
+    if (roomView?.status === 'lobby' && roomCode) {
+      await leaveSharedRoom({ code: roomCode, sessionId })
+      setRoom(null)
+      setRoomCode('')
+      setJoinCodeInput('')
+      setCopied(false)
+      autoJoinCodeRef.current = ''
+      clearRoomUrl()
+      return
+    }
+
     if (!room) {
       setRoomCode('')
       setRoom(null)
@@ -292,6 +366,10 @@ function App() {
   }
 
   function handleToggleReady() {
+    if (roomView?.status === 'lobby' && roomCode && me) {
+      void setSharedReady({ code: roomCode, sessionId, ready: !me.ready })
+      return
+    }
     updateRoom((draft) => {
       const player = draft.players.find((entry) => entry.sessionId === sessionId)
       if (player) {
@@ -302,6 +380,14 @@ function App() {
 
   function handleRename(nextNickname: string) {
     setNickname(nextNickname)
+    if (roomView?.status === 'lobby' && roomCode) {
+      void renameSharedPlayer({
+        code: roomCode,
+        sessionId,
+        nickname: nextNickname.trim() || 'Player',
+      })
+      return
+    }
     updateRoom((draft) => {
       const player = draft.players.find((entry) => entry.sessionId === sessionId)
       if (player) {
@@ -311,6 +397,12 @@ function App() {
   }
 
   function handleStartGame() {
+    if (roomView?.status === 'lobby') {
+      setJoinError(
+        'Le lobby est maintenant partage via Convex. La synchro complete de la partie arrive a l etape suivante.',
+      )
+      return
+    }
     updateRoom((draft) => {
       if (draft.status !== 'lobby') {
         return
@@ -375,13 +467,13 @@ function App() {
   }
 
   function canFinalizeReview(round: GameRound) {
-    const participantIds = room?.players.map((player) => player.id) ?? []
-    return participantIds.every((targetPlayerId) =>
+    const participantIds = roomView?.players.map((player: Player) => player.id) ?? []
+    return participantIds.every((targetPlayerId: string) =>
       round.categoryIds.every((categoryId) =>
         participantIds
-          .filter((voterId) => voterId !== targetPlayerId)
+          .filter((voterId: string) => voterId !== targetPlayerId)
           .every(
-            (voterId) =>
+            (voterId: string) =>
               typeof round.votes[targetPlayerId]?.[categoryId]?.[voterId] === 'boolean',
           ),
       ),
@@ -418,7 +510,7 @@ function App() {
     })
   }
 
-  const shareUrl = room ? roomShareUrl(room.code) : ''
+  const shareUrl = roomView ? roomShareUrl(roomView.code) : ''
   const secondsLeft = currentRound
     ? Math.max(0, Math.ceil((currentRound.endsAt - clockMs) / 1000))
     : 0
@@ -432,7 +524,7 @@ function App() {
     window.setTimeout(() => setCopied(false), 1500)
   }
 
-  if (!room || !me) {
+  if (!roomView || !me) {
     return (
       <main className="app-shell">
         <section className="hero-panel">
@@ -514,6 +606,7 @@ function App() {
               <button type="button" className="secondary" onClick={handleJoinRoom}>
                 Rejoindre la room
               </button>
+              {joinError ? <p className="join-error">{joinError}</p> : null}
               <ul className="bullet-list">
                 <li>Acces anonyme par lien ou code</li>
                 <li>6 categories par round, sans repetition inutile</li>
@@ -530,7 +623,7 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <span className="eyebrow">Room {room.code}</span>
+          <span className="eyebrow">Room {roomView.code}</span>
           <h1>Petit Bac No-Code France</h1>
         </div>
         <div className="topbar-actions">
@@ -543,7 +636,7 @@ function App() {
           <button type="button" className="secondary" onClick={copyInviteLink}>
             {copied ? 'Lien copie' : 'Copier le lien'}
           </button>
-          <span className="status-pill">{room.status}</span>
+          <span className="status-pill">{roomView.status}</span>
         </div>
       </header>
 
@@ -551,22 +644,22 @@ function App() {
         <aside className="surface sidebar">
           <div className="sidebar-block">
             <span className="section-kicker">Configuration</span>
-            <p>{room.config.roundCount} rounds</p>
-            <p>{room.config.roundDurationSeconds}s par round</p>
-            <p>{room.config.maxPlayers} joueurs max</p>
+            <p>{roomView.config.roundCount} rounds</p>
+            <p>{roomView.config.roundDurationSeconds}s par round</p>
+            <p>{roomView.config.maxPlayers} joueurs max</p>
           </div>
 
           <div className="sidebar-block">
             <span className="section-kicker">Joueurs</span>
             <ul className="player-list">
-              {room.players.map((player) => {
+              {roomView.players.map((player: Player) => {
                 const online = playersOnline.some((entry) => entry.id === player.id)
                 return (
                   <li key={player.id} className="player-row">
                     <div>
                       <strong>{player.nickname}</strong>
                       <span>
-                        {player.id === room.hostPlayerId ? 'Hote' : 'Participant'}
+                        {player.id === roomView.hostPlayerId ? 'Hote' : 'Participant'}
                         {' · '}
                         {online ? 'Connecte' : 'Absent'}
                       </span>
@@ -586,7 +679,7 @@ function App() {
               Mon pseudo
               <input value={nickname} onChange={(event) => handleRename(event.target.value)} />
             </label>
-            {room.status === 'lobby' ? (
+            {roomView.status === 'lobby' ? (
               <button type="button" className="secondary" onClick={handleToggleReady}>
                 {me.ready ? 'Annuler pret' : 'Je suis pret'}
               </button>
@@ -595,7 +688,7 @@ function App() {
         </aside>
 
         <section className="main-stage">
-          {room.status === 'lobby' ? (
+          {roomView.status === 'lobby' ? (
             <section className="surface stage-card">
               <span className="section-kicker">Lobby</span>
               <h2>Invite l equipe et lance la partie</h2>
@@ -613,10 +706,10 @@ function App() {
                 <button
                   type="button"
                   className="cta"
-                  disabled={!isHost || room.players.length < 1}
+                  disabled
                   onClick={handleStartGame}
                 >
-                  {isHost ? 'Demarrer la partie' : 'Seul l hote peut lancer'}
+                  Gameplay sync bientot
                 </button>
                 <button type="button" className="ghost" onClick={handleLeaveRoom}>
                   Annuler et revenir a l accueil
@@ -625,12 +718,12 @@ function App() {
             </section>
           ) : null}
 
-          {room.status === 'playing' && currentRound ? (
+          {roomView.status === 'playing' && currentRound ? (
             <section className="surface stage-card">
               <div className="round-head">
                 <div>
                   <span className="section-kicker">
-                    Round {currentRound.index + 1} / {room.config.roundCount}
+                    Round {currentRound.index + 1} / {roomView.config.roundCount}
                   </span>
                   <h2>Lettre {currentRound.letter}</h2>
                 </div>
@@ -664,7 +757,7 @@ function App() {
             </section>
           ) : null}
 
-          {room.status === 'review' && currentRound ? (
+          {roomView.status === 'review' && currentRound ? (
             <section className="surface stage-card">
               <div className="round-head">
                 <div>
@@ -676,9 +769,9 @@ function App() {
                 </div>
               </div>
               <div className="vote-stack">
-                {room.players
-                  .filter((player) => player.id !== me.id)
-                  .map((player) => {
+                {roomView.players
+                  .filter((player: Player) => player.id !== me.id)
+                  .map((player: Player) => {
                     const submission = currentRound.submissions[player.id]
                     return (
                       <article key={player.id} className="vote-card">
@@ -737,17 +830,17 @@ function App() {
             </section>
           ) : null}
 
-          {(room.status === 'results' || room.status === 'finished') && currentRound ? (
+          {(roomView.status === 'results' || roomView.status === 'finished') && currentRound ? (
             <section className="surface stage-card">
               <span className="section-kicker">
-                {room.status === 'finished' ? 'Classement final' : 'Scoreboard'}
+                {roomView.status === 'finished' ? 'Classement final' : 'Scoreboard'}
               </span>
               <h2>Resultats du round {currentRound.index + 1}</h2>
               <div className="results-grid">
                 <div className="surface inner-card">
                   <h3>Classement</h3>
                   <ol className="score-list">
-                    {[...room.players]
+                    {[...roomView.players]
                       .sort((left, right) => right.scoreTotal - left.scoreTotal)
                       .map((player) => (
                         <li key={player.id}>
@@ -763,7 +856,7 @@ function App() {
                     {currentRound.scoreDetails.map((detail) => (
                       <div key={`${detail.playerId}-${detail.categoryId}`} className="result-line">
                         <span>
-                          {playerById(room.players, detail.playerId)?.nickname} ·{' '}
+                          {playerById(roomView.players, detail.playerId)?.nickname} ·{' '}
                           {categoryLabel(detail.categoryId)}
                         </span>
                         <strong>
@@ -775,7 +868,7 @@ function App() {
                 </div>
               </div>
               <div className="cta-row">
-                {room.status !== 'finished' ? (
+                {roomView.status !== 'finished' ? (
                   <>
                     <button
                       type="button"

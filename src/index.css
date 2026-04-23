@@ -281,6 +281,15 @@ label,
   margin-top: 36px;
 }
 
+.join-error {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(250, 107, 90, 0.14);
+  color: #ffe4df;
+  line-height: 1.45;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
