@@ -350,6 +350,18 @@ label,
 
 .player-meta {
   text-align: right;
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.player-action {
+  border-radius: 999px;
+  min-height: 38px;
+  padding: 0.55rem 0.85rem;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
 }
 
 .main-stage {

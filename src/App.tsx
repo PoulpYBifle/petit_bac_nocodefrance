@@ -2,32 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
 import './index.css'
 import { api } from '../convex/_generated/api'
-import {
-  activePlayers,
-  categoryLabel,
-  createRound,
-  ensureSubmission,
-  generateId,
-  getRound,
-  matchesRoundLetter,
-  playerById,
-  reassignHost,
-  roomShareUrl,
-  scoreRound,
-} from './lib/game'
-import type {
-  GameRound,
-  Player,
-  Room,
-  RoomConfig,
-  RoundCount,
-  RoundDurationSeconds,
-} from './types'
+import { activePlayers, categoryLabel, generateId, matchesRoundLetter, playerById, roomShareUrl } from './lib/game'
+import type { GameRound, Player, Room, RoomConfig, RoundCount, RoundDurationSeconds } from './types'
 
-const ROOM_STORAGE_PREFIX = 'petit-bac-room:'
 const SESSION_STORAGE_KEY = 'petit-bac-session-id'
 const PSEUDO_STORAGE_KEY = 'petit-bac-pseudo'
-const channel = new BroadcastChannel('petit-bac-nocode')
 const now = () => Date.now()
 
 function getSessionId() {
@@ -38,16 +17,6 @@ function getSessionId() {
   const created = generateId('session')
   sessionStorage.setItem(SESSION_STORAGE_KEY, created)
   return created
-}
-
-function loadRoom(code: string) {
-  const raw = localStorage.getItem(`${ROOM_STORAGE_PREFIX}${code}`)
-  return raw ? (JSON.parse(raw) as Room) : null
-}
-
-function saveRoom(room: Room) {
-  localStorage.setItem(`${ROOM_STORAGE_PREFIX}${room.code}`, JSON.stringify(room))
-  channel.postMessage({ type: 'room:update', code: room.code })
 }
 
 function clearRoomUrl() {
@@ -64,58 +33,6 @@ function defaultConfig(): RoomConfig {
   }
 }
 
-interface SharedLobbyPlayer {
-  sessionId: string
-  nickname: string
-  scoreTotal: number
-  ready: boolean
-  joinedAt: number
-  lastSeenAt: number
-}
-
-interface SharedLobbyRoom {
-  _id: string
-  code: string
-  hostPlayerId: string
-  status: Room['status']
-  config: RoomConfig
-  createdAt: number
-  updatedAt: number
-  currentRoundIndex: number
-  usedLetters: string[]
-  usedCategoryIds: string[]
-  players: SharedLobbyPlayer[]
-}
-
-function toLobbyRoom(sharedRoom: SharedLobbyRoom | null | undefined) {
-  if (!sharedRoom) {
-    return null
-  }
-
-  return {
-    id: String(sharedRoom._id),
-    code: sharedRoom.code,
-    hostPlayerId: sharedRoom.hostPlayerId,
-    status: sharedRoom.status,
-    config: sharedRoom.config,
-    createdAt: sharedRoom.createdAt,
-    updatedAt: sharedRoom.updatedAt,
-    currentRoundIndex: sharedRoom.currentRoundIndex,
-    usedLetters: sharedRoom.usedLetters,
-    usedCategoryIds: sharedRoom.usedCategoryIds,
-    rounds: [],
-    players: sharedRoom.players.map((player) => ({
-      id: player.sessionId,
-      sessionId: player.sessionId,
-      nickname: player.nickname,
-      scoreTotal: player.scoreTotal,
-      ready: player.ready,
-      joinedAt: player.joinedAt,
-      lastSeenAt: player.lastSeenAt,
-    })),
-  } satisfies Room
-}
-
 function App() {
   const sessionId = useMemo(() => getSessionId(), [])
   const [nickname, setNickname] = useState(
@@ -126,53 +43,41 @@ function App() {
   const [roomCode, setRoomCode] = useState(
     new URLSearchParams(window.location.search).get('room')?.toUpperCase() ?? '',
   )
-  const [room, setRoom] = useState<Room | null>(() =>
-    roomCode ? loadRoom(roomCode) : null,
-  )
   const [copied, setCopied] = useState(false)
   const [clockMs, setClockMs] = useState(() => now())
   const [joinError, setJoinError] = useState('')
+  const [draftState, setDraftState] = useState<{
+    roundId: string | null
+    answers: Record<string, string>
+  }>({
+    roundId: null,
+    answers: {},
+  })
   const autoJoinCodeRef = useRef('')
 
-  const sharedRoom = useQuery(api.lobby.getRoomByCode, roomCode ? { code: roomCode } : 'skip')
+  const roomView = useQuery(api.game.getGameRoomByCode, roomCode ? { code: roomCode } : 'skip') as
+    | Room
+    | null
+    | undefined
+
   const createSharedRoom = useMutation(api.lobby.createRoom)
   const joinSharedRoom = useMutation(api.lobby.joinRoom)
   const setSharedReady = useMutation(api.lobby.setReady)
   const renameSharedPlayer = useMutation(api.lobby.renamePlayer)
   const sharedHeartbeat = useMutation(api.lobby.heartbeat)
   const leaveSharedRoom = useMutation(api.lobby.leaveRoom)
+  const kickSharedPlayer = useMutation(api.lobby.kickPlayer)
 
-  const lobbyRoom = useMemo(
-    () => toLobbyRoom((sharedRoom as SharedLobbyRoom | null | undefined) ?? null),
-    [sharedRoom],
-  )
-  const roomView = lobbyRoom ?? room
+  const startSharedGame = useMutation(api.game.startGame)
+  const saveSharedAnswers = useMutation(api.game.saveAnswers)
+  const forceEndSharedRound = useMutation(api.game.forceEndRound)
+  const voteSharedAnswer = useMutation(api.game.voteAnswer)
+  const finalizeSharedReview = useMutation(api.game.finalizeReview)
+  const startSharedNextRound = useMutation(api.game.startNextRound)
 
   useEffect(() => {
     localStorage.setItem(PSEUDO_STORAGE_KEY, nickname)
   }, [nickname])
-
-  useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (!roomCode || event.key !== `${ROOM_STORAGE_PREFIX}${roomCode}`) {
-        return
-      }
-      setRoom(loadRoom(roomCode))
-    }
-
-    const onMessage = (event: MessageEvent<{ type: string; code: string }>) => {
-      if (event.data.type === 'room:update' && event.data.code === roomCode) {
-        setRoom(loadRoom(roomCode))
-      }
-    }
-
-    window.addEventListener('storage', onStorage)
-    channel.addEventListener('message', onMessage)
-    return () => {
-      window.removeEventListener('storage', onStorage)
-      channel.removeEventListener('message', onMessage)
-    }
-  }, [roomCode])
 
   useEffect(() => {
     if (!roomCode) {
@@ -204,7 +109,6 @@ function App() {
       .catch((error: unknown) => {
         if (!canceled) {
           setJoinError(error instanceof Error ? error.message : 'Impossible de rejoindre la room')
-          setRoom(null)
         }
       })
 
@@ -217,49 +121,12 @@ function App() {
     if (!roomCode) {
       return
     }
-
     const heartbeat = window.setInterval(() => {
       void sharedHeartbeat({ code: roomCode, sessionId })
     }, 5000)
 
     return () => window.clearInterval(heartbeat)
   }, [roomCode, sessionId, sharedHeartbeat])
-
-  useEffect(() => {
-    if (!room) {
-      return
-    }
-    const currentRound = getRound(room)
-    if (!currentRound || currentRound.status !== 'playing') {
-      return
-    }
-
-    const interval = window.setInterval(() => {
-      const latest = loadRoom(room.code)
-      if (!latest) {
-        return
-      }
-      const round = getRound(latest)
-      if (!round || round.status !== 'playing') {
-        return
-      }
-      if (now() >= round.endsAt) {
-        for (const player of latest.players) {
-          const submission = ensureSubmission(round, player.id)
-          if (!submission.submittedAt) {
-            submission.submittedAt = now()
-          }
-        }
-        latest.status = 'review'
-        round.status = 'review'
-        latest.updatedAt = now()
-        saveRoom(latest)
-        setRoom(latest)
-      }
-    }, 1000)
-
-    return () => window.clearInterval(interval)
-  }, [room])
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -269,25 +136,25 @@ function App() {
     return () => window.clearInterval(interval)
   }, [])
 
-  const me =
-    roomView?.players.find((player: Player) => player.sessionId === sessionId) ?? null
+  const me = roomView?.players.find((player: Player) => player.sessionId === sessionId) ?? null
   const isHost = me?.id === roomView?.hostPlayerId
-  const currentRound = roomView ? getRound(roomView) : null
+  const currentRound = roomView ? roomView.rounds[roomView.currentRoundIndex] ?? null : null
   const currentSubmission =
     roomView && me && currentRound ? currentRound.submissions[me.id] ?? null : null
   const playersOnline = roomView ? activePlayers(roomView) : []
+  const draftAnswers =
+    currentRound && draftState.roundId === currentRound.id
+      ? draftState.answers
+      : (currentSubmission?.answers ?? {})
 
-  function updateRoom(mutator: (draft: Room) => void) {
-    if (!room) {
+  useEffect(() => {
+    if (!roomCode || !roomView || roomView.status !== 'playing' || !currentRound) {
       return
     }
-    const draft = structuredClone(room)
-    mutator(draft)
-    draft.updatedAt = now()
-    reassignHost(draft)
-    saveRoom(draft)
-    setRoom(draft)
-  }
+    if (Date.now() >= currentRound.endsAt) {
+      void forceEndSharedRound({ code: roomCode })
+    }
+  }, [currentRound, forceEndSharedRound, roomCode, roomView, clockMs])
 
   async function handleCreateRoom() {
     const created = await createSharedRoom({
@@ -311,158 +178,99 @@ function App() {
   }
 
   async function handleLeaveRoom() {
-    if (roomView?.status === 'lobby' && roomCode) {
+    if (roomCode) {
       await leaveSharedRoom({ code: roomCode, sessionId })
-      setRoom(null)
-      setRoomCode('')
-      setJoinCodeInput('')
-      setCopied(false)
-      autoJoinCodeRef.current = ''
-      clearRoomUrl()
-      return
     }
-
-    if (!room) {
-      setRoomCode('')
-      setRoom(null)
-      clearRoomUrl()
-      return
-    }
-
-    const draft = structuredClone(room)
-    const leavingPlayer = draft.players.find((player) => player.sessionId === sessionId)
-
-    if (leavingPlayer) {
-      draft.players = draft.players.filter((player) => player.id !== leavingPlayer.id)
-
-      for (const round of draft.rounds) {
-        delete round.submissions[leavingPlayer.id]
-        delete round.votes[leavingPlayer.id]
-        for (const targetVotes of Object.values(round.votes)) {
-          for (const categoryVotes of Object.values(targetVotes)) {
-            delete categoryVotes[leavingPlayer.id]
-          }
-        }
-        round.scoreDetails = round.scoreDetails.filter(
-          (detail) => detail.playerId !== leavingPlayer.id,
-        )
-      }
-    }
-
-    reassignHost(draft)
-    draft.updatedAt = now()
-
-    if (draft.players.length === 0) {
-      localStorage.removeItem(`${ROOM_STORAGE_PREFIX}${room.code}`)
-      channel.postMessage({ type: 'room:update', code: room.code })
-    } else {
-      saveRoom(draft)
-    }
-
-    setRoom(null)
     setRoomCode('')
+    setJoinCodeInput('')
     setCopied(false)
+    autoJoinCodeRef.current = ''
     clearRoomUrl()
   }
 
   function handleToggleReady() {
-    if (roomView?.status === 'lobby' && roomCode && me) {
-      void setSharedReady({ code: roomCode, sessionId, ready: !me.ready })
+    if (!roomCode || !me) {
       return
     }
-    updateRoom((draft) => {
-      const player = draft.players.find((entry) => entry.sessionId === sessionId)
-      if (player) {
-        player.ready = !player.ready
-      }
-    })
+    void setSharedReady({ code: roomCode, sessionId, ready: !me.ready })
   }
 
   function handleRename(nextNickname: string) {
     setNickname(nextNickname)
-    if (roomView?.status === 'lobby' && roomCode) {
-      void renameSharedPlayer({
-        code: roomCode,
-        sessionId,
-        nickname: nextNickname.trim() || 'Player',
-      })
+    if (!roomCode) {
       return
     }
-    updateRoom((draft) => {
-      const player = draft.players.find((entry) => entry.sessionId === sessionId)
-      if (player) {
-        player.nickname = nextNickname.trim() || 'Player'
-      }
+    void renameSharedPlayer({
+      code: roomCode,
+      sessionId,
+      nickname: nextNickname.trim() || 'Player',
+    })
+  }
+
+  function handleKickPlayer(targetSessionId: string) {
+    if (!roomCode || !isHost) {
+      return
+    }
+    void kickSharedPlayer({
+      code: roomCode,
+      hostSessionId: sessionId,
+      targetSessionId,
     })
   }
 
   function handleStartGame() {
-    if (roomView?.status === 'lobby') {
-      setJoinError(
-        'Le lobby est maintenant partage via Convex. La synchro complete de la partie arrive a l etape suivante.',
-      )
+    if (!roomCode || !isHost) {
       return
     }
-    updateRoom((draft) => {
-      if (draft.status !== 'lobby') {
-        return
-      }
-      const firstRound = createRound(draft, 0)
-      draft.status = 'playing'
-      draft.currentRoundIndex = 0
-      draft.usedLetters = [firstRound.letter]
-      draft.usedCategoryIds = [...firstRound.categoryIds]
-      draft.rounds = [firstRound]
-      draft.players.forEach((player) => {
-        player.scoreTotal = 0
-      })
-    })
+    void startSharedGame({ code: roomCode, hostSessionId: sessionId })
   }
 
   function updateAnswer(categoryId: string, value: string) {
-    updateRoom((draft) => {
-      const player = draft.players.find((entry) => entry.sessionId === sessionId)
-      const round = getRound(draft)
-      if (!player || !round) {
-        return
-      }
-      const submission = ensureSubmission(round, player.id)
-      submission.answers[categoryId] = value
+    const baseAnswers =
+      currentRound && draftState.roundId === currentRound.id
+        ? draftState.answers
+        : (currentSubmission?.answers ?? {})
+    const next = { ...baseAnswers, [categoryId]: value }
+    setDraftState({
+      roundId: currentRound?.id ?? null,
+      answers: next,
     })
+    if (roomCode) {
+      void saveSharedAnswers({
+        code: roomCode,
+        sessionId,
+        answers: { [categoryId]: value },
+        submit: false,
+      })
+    }
   }
 
   function handleSubmitRound() {
-    updateRoom((draft) => {
-      const player = draft.players.find((entry) => entry.sessionId === sessionId)
-      const round = getRound(draft)
-      if (!player || !round) {
-        return
-      }
-      const submission = ensureSubmission(round, player.id)
-      submission.submittedAt = now()
-
-      const everyoneSubmitted = draft.players.every((entry) => {
-        const candidate = ensureSubmission(round, entry.id)
-        return Boolean(candidate.submittedAt)
-      })
-
-      if (everyoneSubmitted) {
-        draft.status = 'review'
-        round.status = 'review'
-      }
+    if (!roomCode) {
+      return
+    }
+    const answers =
+      currentRound && draftState.roundId === currentRound.id
+        ? draftState.answers
+        : draftAnswers
+    void saveSharedAnswers({
+      code: roomCode,
+      sessionId,
+      answers,
+      submit: true,
     })
   }
 
   function recordVote(targetPlayerId: string, categoryId: string, approved: boolean) {
-    updateRoom((draft) => {
-      const voter = draft.players.find((entry) => entry.sessionId === sessionId)
-      const round = getRound(draft)
-      if (!voter || !round || voter.id === targetPlayerId) {
-        return
-      }
-      round.votes[targetPlayerId] ??= {}
-      round.votes[targetPlayerId][categoryId] ??= {}
-      round.votes[targetPlayerId][categoryId][voter.id] = approved
+    if (!roomCode || !me) {
+      return
+    }
+    void voteSharedAnswer({
+      code: roomCode,
+      voterSessionId: sessionId,
+      targetPlayerId,
+      categoryId,
+      approved,
     })
   }
 
@@ -481,33 +289,17 @@ function App() {
   }
 
   function handleFinalizeReview() {
-    updateRoom((draft) => {
-      const round = getRound(draft)
-      if (!round) {
-        return
-      }
-      scoreRound(draft, round)
-
-      const isLastRound = draft.currentRoundIndex >= draft.config.roundCount - 1
-      if (isLastRound) {
-        draft.status = 'finished'
-        return
-      }
-
-      draft.status = 'results'
-    })
+    if (!roomCode || !isHost) {
+      return
+    }
+    void finalizeSharedReview({ code: roomCode, hostSessionId: sessionId })
   }
 
   function handleNextRound() {
-    updateRoom((draft) => {
-      const nextIndex = draft.currentRoundIndex + 1
-      const round = createRound(draft, nextIndex)
-      draft.currentRoundIndex = nextIndex
-      draft.status = 'playing'
-      draft.usedLetters.push(round.letter)
-      draft.usedCategoryIds.push(...round.categoryIds)
-      draft.rounds.push(round)
-    })
+    if (!roomCode || !isHost) {
+      return
+    }
+    void startSharedNextRound({ code: roomCode, hostSessionId: sessionId })
   }
 
   const shareUrl = roomView ? roomShareUrl(roomView.code) : ''
@@ -667,6 +459,15 @@ function App() {
                     <div className="player-meta">
                       <span>{player.ready ? 'Pret' : 'En attente'}</span>
                       <strong>{player.scoreTotal} pts</strong>
+                      {isHost && player.id !== me.id ? (
+                        <button
+                          type="button"
+                          className={online ? 'player-action' : 'player-action danger'}
+                          onClick={() => handleKickPlayer(player.sessionId)}
+                        >
+                          {online ? 'Retirer' : 'Virer AFK'}
+                        </button>
+                      ) : null}
                     </div>
                   </li>
                 )
@@ -692,10 +493,7 @@ function App() {
             <section className="surface stage-card">
               <span className="section-kicker">Lobby</span>
               <h2>Invite l equipe et lance la partie</h2>
-              <p>
-                Le MVP local synchronise la room entre onglets et navigateurs du meme poste.
-                La structure est prete pour etre branchee a Convex ensuite.
-              </p>
+              <p>Le lobby et la partie sont maintenant synchronises en temps reel via Convex.</p>
               <div className="share-box">
                 <code>{shareUrl}</code>
               </div>
@@ -706,10 +504,10 @@ function App() {
                 <button
                   type="button"
                   className="cta"
-                  disabled
+                  disabled={!isHost}
                   onClick={handleStartGame}
                 >
-                  Gameplay sync bientot
+                  {isHost ? 'Demarrer la partie' : 'Seul l hote peut lancer'}
                 </button>
                 <button type="button" className="ghost" onClick={handleLeaveRoom}>
                   Annuler et revenir a l accueil
@@ -731,7 +529,7 @@ function App() {
               </div>
               <div className="answer-grid">
                 {currentRound.categoryIds.map((categoryId) => {
-                  const value = currentSubmission?.answers[categoryId] ?? ''
+                  const value = draftAnswers[categoryId] ?? ''
                   const matches = value === '' || matchesRoundLetter(value, currentRound.letter)
                   return (
                     <label key={categoryId} className={matches ? 'answer-card' : 'answer-card invalid'}>

@@ -263,7 +263,44 @@ export const leaveRoom = mutation({
 
     const oldest = [...remainingPlayers].sort((left, right) => left.joinedAt - right.joinedAt)[0]
     await ctx.db.patch(room._id, {
-      hostPlayerId: oldest?.sessionId === room.hostPlayerId ? room.hostPlayerId : oldest.sessionId,
+      hostPlayerId: oldest.sessionId,
+      updatedAt: Date.now(),
+    })
+  },
+})
+
+export const kickPlayer = mutation({
+  args: {
+    code: v.string(),
+    hostSessionId: v.string(),
+    targetSessionId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const room = await ctx.db
+      .query('rooms')
+      .withIndex('by_code', (q) => q.eq('code', args.code))
+      .unique()
+    if (!room) {
+      throw new Error('Room not found')
+    }
+    if (room.hostPlayerId !== args.hostSessionId) {
+      throw new Error('Only the host can remove players')
+    }
+    if (args.hostSessionId === args.targetSessionId) {
+      throw new Error('Host cannot remove themselves')
+    }
+
+    const players = await ctx.db
+      .query('players')
+      .withIndex('by_room', (q) => q.eq('roomId', room._id))
+      .collect()
+    const player = players.find((entry) => entry.sessionId === args.targetSessionId)
+    if (!player) {
+      return
+    }
+
+    await ctx.db.delete(player._id)
+    await ctx.db.patch(room._id, {
       updatedAt: Date.now(),
     })
   },
