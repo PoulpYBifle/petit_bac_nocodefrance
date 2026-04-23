@@ -84,25 +84,37 @@ input:focus {
 
 .hero-panel {
   padding: 40px;
+  position: relative;
+  overflow: hidden;
 }
 
 .brand-lockup {
   display: grid;
-  gap: 18px;
-  justify-items: start;
+  gap: 22px;
   margin-bottom: 40px;
+  max-width: 1320px;
+}
+
+.hero-corner-logo {
+  position: absolute;
+  top: 28px;
+  right: 28px;
+  width: 116px;
+  height: 116px;
+  object-fit: contain;
+  filter: drop-shadow(0 15px 25px rgba(249, 167, 93, 0.35));
+  pointer-events: none;
+}
+
+.brand-copy {
+  display: grid;
+  gap: 22px;
+  min-width: 0;
   max-width: 1200px;
 }
 
-.brand-logo {
-  width: 132px;
-  height: 132px;
-  object-fit: contain;
-  filter: drop-shadow(0 15px 25px rgba(249, 167, 93, 0.35));
-}
-
 .hero-copy {
-  max-width: 52ch;
+  max-width: 64ch;
   font-size: 1.12rem;
 }
 
@@ -128,7 +140,7 @@ p {
 h1 {
   font-size: clamp(2.8rem, 5vw, 5rem);
   line-height: 0.98;
-  max-width: 18ch;
+  max-width: 15ch;
 }
 
 h2 {
@@ -456,9 +468,15 @@ label,
     grid-template-columns: 1fr;
   }
 
-  .brand-logo {
-    width: 92px;
-    height: 92px;
+  .brand-copy {
+    gap: 16px;
+  }
+
+  .hero-corner-logo {
+    top: 18px;
+    right: 18px;
+    width: 74px;
+    height: 74px;
   }
 
   .app-shell {

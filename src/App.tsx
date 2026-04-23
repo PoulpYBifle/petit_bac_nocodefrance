@@ -436,14 +436,15 @@ function App() {
     return (
       <main className="app-shell">
         <section className="hero-panel">
+          <img src="/logo-triline.png" alt="Petit Bac No-Code France" className="hero-corner-logo" />
           <div className="brand-lockup">
-            <img src="/logo-triline.png" alt="Petit Bac No-Code France" className="brand-logo" />
-            <span className="eyebrow">No-Code France</span>
-            <h1>Petit Bac multiplayer pour builders du web</h1>
-            <p className="hero-copy">
-              Cree une room sans compte, invite jusqu a 16 joueurs et enchaine des rounds
-              dev, no-code et culture web en temps reel.
-            </p>
+            <div className="brand-copy">
+              <h1>Petit Bac multiplayer pour builders du web</h1>
+              <p className="hero-copy">
+                Cree une room sans compte, invite jusqu a 16 joueurs et enchaine des
+                rounds dev, no-code et culture web en temps reel.
+              </p>
+            </div>
           </div>
 
           <div className="hero-grid">
